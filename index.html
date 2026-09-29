@@ -1,0 +1,807 @@
+from pathlib import Path
+
+html = r'''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🏎️ سباق السيارات</title>
+<style>
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    font-family: Arial, sans-serif;
+    color: white;
+    padding: 15px;
+}
+
+.game-container {
+    width: min(400px, 100%);
+    text-align: center;
+}
+
+.game-info {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.score-box,
+.high-score-box {
+    flex: 1;
+    padding: 10px;
+    background: rgba(233, 69, 96, 0.2);
+    border: 1px solid #e94560;
+    border-radius: 10px;
+    font-size: 16px;
+}
+
+.high-score-box {
+    background: rgba(253, 203, 110, 0.1);
+    border-color: #fdcb6e;
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    max-width: 400px;
+    height: auto;
+    margin: auto;
+    border: 3px solid #e94560;
+    border-radius: 10px;
+    background: #333;
+    box-shadow: 0 0 30px rgba(233, 69, 96, 0.3);
+}
+
+.controls-info {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.5);
+    color: #aaa;
+    font-size: 14px;
+}
+
+.controls-info span {
+    color: #e94560;
+    font-weight: bold;
+}
+
+button {
+    margin-top: 10px;
+    padding: 10px 22px;
+    border: none;
+    border-radius: 8px;
+    background: #e94560;
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #ff5a72;
+}
+</style>
+</head>
+
+<body>
+<div class="game-container">
+
+    <div class="game-info">
+        <div class="score-box">
+            🏆 النقاط: <span id="score">0</span>
+        </div>
+
+        <div class="high-score-box">
+            ⭐ أفضل نتيجة: <span id="highScore">0</span>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas" width="400" height="600"></canvas>
+
+    <div class="controls-info">
+        استخدم <span>←</span> <span>→</span> للتحرك
+        <br>
+        <span>مسافة</span> للبدء أو إعادة اللعب
+    </div>
+
+    <button id="soundButton">🔊 الصوت: تشغيل</button>
+</div>
+
+<script>
+"use strict";
+
+// ==============================
+// عناصر الصفحة
+// ==============================
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const scoreElement = document.getElementById("score");
+const highScoreElement = document.getElementById("highScore");
+const soundButton = document.getElementById("soundButton");
+
+// ==============================
+// إعدادات اللعبة
+// ==============================
+const ROAD_WIDTH = 300;
+const ROAD_X = (canvas.width - ROAD_WIDTH) / 2;
+
+const LANE_COUNT = 3;
+const LANE_WIDTH = ROAD_WIDTH / LANE_COUNT;
+
+const CAR_WIDTH = 42;
+const CAR_HEIGHT = 70;
+
+const PLAYER_SPEED = 6;
+
+let gameState = "start";
+let score = 0;
+let highScore = Number(localStorage.getItem("carHighScore")) || 0;
+
+let speed = 4;
+let spawnTimer = 0;
+let roadOffset = 0;
+
+let keys = {
+    left: false,
+    right: false
+};
+
+let enemies = [];
+
+// ==============================
+// اللاعب
+// ==============================
+const player = {
+    x: canvas.width / 2 - CAR_WIDTH / 2,
+    y: canvas.height - 100,
+    width: CAR_WIDTH,
+    height: CAR_HEIGHT
+};
+
+// ==============================
+// الصوت
+// ==============================
+let audioCtx = null;
+let soundEnabled = true;
+let engineTimer = null;
+
+function initAudio() {
+    if (!audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+
+        if (!AudioContext) {
+            return;
+        }
+
+        audioCtx = new AudioContext();
+    }
+
+    if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+    }
+}
+
+function playTone(frequency, duration, type = "sine", volume = 0.08) {
+    if (!soundEnabled) return;
+
+    try {
+        initAudio();
+
+        if (!audioCtx) return;
+
+        const oscillator = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(
+            frequency,
+            audioCtx.currentTime
+        );
+
+        gain.gain.setValueAtTime(
+            volume,
+            audioCtx.currentTime
+        );
+
+        gain.gain.exponentialRampToValueAtTime(
+            0.001,
+            audioCtx.currentTime + duration
+        );
+
+        oscillator.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + duration);
+    } catch (error) {
+        // تجاهل أخطاء الصوت
+    }
+}
+
+function playStartSound() {
+    playTone(440, 0.12);
+    setTimeout(() => playTone(660, 0.15), 100);
+}
+
+function playScoreSound() {
+    playTone(700, 0.08);
+    setTimeout(() => playTone(900, 0.08), 70);
+}
+
+function playCrashSound() {
+    if (!soundEnabled) return;
+
+    try {
+        initAudio();
+
+        if (!audioCtx) return;
+
+        const duration = 0.35;
+        const bufferSize = Math.floor(audioCtx.sampleRate * duration);
+
+        const buffer = audioCtx.createBuffer(
+            1,
+            bufferSize,
+            audioCtx.sampleRate
+        );
+
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < bufferSize; i++) {
+            const decay = 1 - i / bufferSize;
+            data[i] = (Math.random() * 2 - 1) * decay * decay;
+        }
+
+        const source = audioCtx.createBufferSource();
+        const gain = audioCtx.createGain();
+
+        source.buffer = buffer;
+        gain.gain.value = 0.35;
+
+        source.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        source.start();
+    } catch (error) {
+        // تجاهل أخطاء الصوت
+    }
+}
+
+function startEngineSound() {
+    if (!soundEnabled || engineTimer) return;
+
+    engineTimer = setInterval(() => {
+        if (gameState === "playing") {
+            playTone(90 + speed * 8, 0.08, "sawtooth", 0.025);
+        }
+    }, 180);
+}
+
+function stopEngineSound() {
+    if (engineTimer) {
+        clearInterval(engineTimer);
+        engineTimer = null;
+    }
+}
+
+// ==============================
+// تهيئة اللعبة
+// ==============================
+function initGame() {
+    score = 0;
+    speed = 4;
+    spawnTimer = 0;
+    roadOffset = 0;
+    enemies = [];
+
+    player.x = canvas.width / 2 - CAR_WIDTH / 2;
+
+    updateScore();
+}
+
+// ==============================
+// تحديث النقاط
+// ==============================
+function updateScore() {
+    scoreElement.textContent = score;
+    highScoreElement.textContent = highScore;
+}
+
+// ==============================
+// إنشاء سيارة عدو
+// ==============================
+function addEnemy() {
+    const lane = Math.floor(Math.random() * LANE_COUNT);
+
+    const x =
+        ROAD_X +
+        lane * LANE_WIDTH +
+        (LANE_WIDTH - CAR_WIDTH) / 2;
+
+    enemies.push({
+        x: x,
+        y: -CAR_HEIGHT - 10,
+        width: CAR_WIDTH,
+        height: CAR_HEIGHT,
+        speed: speed + Math.random() * 1.5,
+        color: ["#e74c3c", "#3498db", "#f1c40f", "#9b59b6"][
+            Math.floor(Math.random() * 4)
+        ]
+    });
+}
+
+// ==============================
+// التصادم
+// ==============================
+function checkCollision(a, b) {
+    const padding = 6;
+
+    return (
+        a.x + padding < b.x + b.width - padding &&
+        a.x + a.width - padding > b.x + padding &&
+        a.y + padding < b.y + b.height - padding &&
+        a.y + a.height - padding > b.y + padding
+    );
+}
+
+// ==============================
+// تحديث اللعبة
+// ==============================
+function update() {
+    if (gameState !== "playing") return;
+
+    // حركة اللاعب
+    if (keys.left) {
+        player.x -= PLAYER_SPEED;
+    }
+
+    if (keys.right) {
+        player.x += PLAYER_SPEED;
+    }
+
+    // إبقاء اللاعب داخل الطريق
+    const minX = ROAD_X + 8;
+    const maxX = ROAD_X + ROAD_WIDTH - player.width - 8;
+
+    if (player.x < minX) {
+        player.x = minX;
+    }
+
+    if (player.x > maxX) {
+        player.x = maxX;
+    }
+
+    // تحريك الطريق
+    roadOffset += speed;
+
+    if (roadOffset >= 60) {
+        roadOffset = 0;
+    }
+
+    // إنشاء أعداء
+    spawnTimer++;
+
+    const spawnDelay = Math.max(28, 70 - score * 1.5);
+
+    if (spawnTimer >= spawnDelay) {
+        addEnemy();
+        spawnTimer = 0;
+    }
+
+    // تحريك الأعداء
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const enemy = enemies[i];
+
+        enemy.y += enemy.speed;
+
+        // تصادم
+        if (checkCollision(player, enemy)) {
+            gameOver();
+            return;
+        }
+
+        // خروج العدو من الشاشة
+        if (enemy.y > canvas.height + 20) {
+            enemies.splice(i, 1);
+
+            score++;
+
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem(
+                    "carHighScore",
+                    String(highScore)
+                );
+            }
+
+            updateScore();
+            playScoreSound();
+        }
+    }
+
+    // زيادة الصعوبة تدريجياً
+    speed = 4 + Math.min(score * 0.12, 6);
+}
+
+// ==============================
+// رسم الطريق
+// ==============================
+function drawRoad() {
+    // الخلفية
+    ctx.fillStyle = "#236b2c";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // الطريق
+    ctx.fillStyle = "#333";
+    ctx.fillRect(
+        ROAD_X,
+        0,
+        ROAD_WIDTH,
+        canvas.height
+    );
+
+    // حواف الطريق
+    ctx.fillStyle = "#ddd";
+
+    ctx.fillRect(
+        ROAD_X,
+        0,
+        5,
+        canvas.height
+    );
+
+    ctx.fillRect(
+        ROAD_X + ROAD_WIDTH - 5,
+        0,
+        5,
+        canvas.height
+    );
+
+    // خطوط المسارات
+    ctx.fillStyle = "#fff";
+
+    for (let lane = 1; lane < LANE_COUNT; lane++) {
+        const x = ROAD_X + lane * LANE_WIDTH;
+
+        for (
+            let y = -60 + roadOffset;
+            y < canvas.height;
+            y += 60
+        ) {
+            ctx.fillRect(x - 3, y, 6, 30);
+        }
+    }
+}
+
+// ==============================
+// رسم سيارة
+// ==============================
+function drawCar(car, color, isPlayer = false) {
+    ctx.save();
+
+    // ظل
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.fillRect(
+        car.x + 4,
+        car.y + 5,
+        car.width,
+        car.height
+    );
+
+    // جسم السيارة
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(
+        car.x,
+        car.y,
+        car.width,
+        car.height,
+        8
+    );
+    ctx.fill();
+
+    // الزجاج
+    ctx.fillStyle = "#1c2833";
+    ctx.fillRect(
+        car.x + 7,
+        car.y + 10,
+        car.width - 14,
+        18
+    );
+
+    // الزجاج الخلفي
+    ctx.fillStyle = "#263b4a";
+    ctx.fillRect(
+        car.x + 7,
+        car.y + car.height - 28,
+        car.width - 14,
+        15
+    );
+
+    // المصابيح
+    ctx.fillStyle = "#fff4a3";
+    ctx.fillRect(car.x + 5, car.y + 3, 9, 5);
+    ctx.fillRect(
+        car.x + car.width - 14,
+        car.y + 3,
+        9,
+        5
+    );
+
+    // المصابيح الخلفية
+    ctx.fillStyle = "#ff3030";
+    ctx.fillRect(
+        car.x + 5,
+        car.y + car.height - 8,
+        9,
+        5
+    );
+
+    ctx.fillRect(
+        car.x + car.width - 14,
+        car.y + car.height - 8,
+        9,
+        5
+    );
+
+    // العجلات
+    ctx.fillStyle = "#111";
+
+    ctx.fillRect(
+        car.x - 4,
+        car.y + 12,
+        5,
+        17
+    );
+
+    ctx.fillRect(
+        car.x + car.width - 1,
+        car.y + 12,
+        5,
+        17
+    );
+
+    ctx.fillRect(
+        car.x - 4,
+        car.y + car.height - 29,
+        5,
+        17
+    );
+
+    ctx.fillRect(
+        car.x + car.width - 1,
+        car.y + car.height - 29,
+        5,
+        17
+    );
+
+    // خط وسط للسيارة
+    if (isPlayer) {
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(
+            car.x + car.width / 2 - 2,
+            car.y + 30,
+            4,
+            25
+        );
+    }
+
+    ctx.restore();
+}
+
+// ==============================
+// الرسم
+// ==============================
+function draw() {
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    drawRoad();
+
+    // سيارات الأعداء
+    for (const enemy of enemies) {
+        drawCar(enemy, enemy.color);
+    }
+
+    // سيارة اللاعب
+    drawCar(player, "#2ecc71", true);
+
+    // شاشة البداية
+    if (gameState === "start") {
+        drawOverlay(
+            "🏎️ سباق السيارات",
+            "اضغط مسافة للبدء"
+        );
+    }
+
+    // شاشة الخسارة
+    if (gameState === "gameover") {
+        drawOverlay(
+            "💥 انتهت اللعبة",
+            "اضغط مسافة لإعادة اللعب"
+        );
+    }
+}
+
+// ==============================
+// شاشة شفافة
+// ==============================
+function drawOverlay(title, message) {
+    ctx.fillStyle = "rgba(0,0,0,0.72)";
+    ctx.fillRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    ctx.textAlign = "center";
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 32px Arial";
+
+    ctx.fillText(
+        title,
+        canvas.width / 2,
+        canvas.height / 2 - 35
+    );
+
+    ctx.fillStyle = "#e94560";
+    ctx.font = "bold 21px Arial";
+
+    ctx.fillText(
+        message,
+        canvas.width / 2,
+        canvas.height / 2 + 15
+    );
+
+    if (gameState === "gameover") {
+        ctx.fillStyle = "#fff";
+        ctx.font = "18px Arial";
+
+        ctx.fillText(
+            `نتيجتك: ${score}`,
+            canvas.width / 2,
+            canvas.height / 2 + 55
+        );
+    }
+
+    ctx.textAlign = "start";
+}
+
+// ==============================
+// بدء اللعبة
+// ==============================
+function startGame() {
+    initAudio();
+    initGame();
+
+    gameState = "playing";
+
+    playStartSound();
+    startEngineSound();
+}
+
+// ==============================
+// نهاية اللعبة
+// ==============================
+function gameOver() {
+    gameState = "gameover";
+
+    stopEngineSound();
+    playCrashSound();
+
+    if (score > highScore) {
+        highScore = score;
+
+        localStorage.setItem(
+            "carHighScore",
+            String(highScore)
+        );
+    }
+
+    updateScore();
+}
+
+// ==============================
+// التحكم بالكيبورد
+// ==============================
+window.addEventListener("keydown", function(event) {
+    if (
+        event.code === "ArrowLeft" ||
+        event.code === "ArrowRight" ||
+        event.code === "Space"
+    ) {
+        event.preventDefault();
+    }
+
+    if (event.code === "ArrowLeft") {
+        keys.left = true;
+    }
+
+    if (event.code === "ArrowRight") {
+        keys.right = true;
+    }
+
+    if (event.code === "Space") {
+        if (
+            gameState === "start" ||
+            gameState === "gameover"
+        ) {
+            startGame();
+        }
+    }
+});
+
+window.addEventListener("keyup", function(event) {
+    if (event.code === "ArrowLeft") {
+        keys.left = false;
+    }
+
+    if (event.code === "ArrowRight") {
+        keys.right = false;
+    }
+});
+
+// ==============================
+// زر الصوت
+// ==============================
+soundButton.addEventListener("click", function() {
+    soundEnabled = !soundEnabled;
+
+    if (soundEnabled) {
+        soundButton.textContent = "🔊 الصوت: تشغيل";
+        initAudio();
+
+        if (gameState === "playing") {
+            startEngineSound();
+        }
+    } else {
+        soundButton.textContent = "🔇 الصوت: إيقاف";
+        stopEngineSound();
+    }
+});
+
+// ==============================
+// حلقة اللعبة
+// ==============================
+function gameLoop() {
+    update();
+    draw();
+
+    requestAnimationFrame(gameLoop);
+}
+
+// ==============================
+// تشغيل اللعبة
+// ==============================
+updateScore();
+initGame();
+gameLoop();
+
+</script>
+</body>
+</html>
+'''
+
+path = Path("/mnt/data/car_game_fixed.html")
+path.write_text(html, encoding="utf-8")
+
+print(f"تم إنشاء الملف: {path}")
+print(f"عدد الأسطر: {len(html.splitlines())}")
